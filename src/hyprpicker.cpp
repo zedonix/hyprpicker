@@ -1,7 +1,11 @@
 #include "hyprpicker.hpp"
+#include "src/notify/Notify.hpp"
 #include <csignal>
+#include <cstddef>
+#include <cstdio>
+#include <format>
 
-void sigHandler(int sig) {
+static void sigHandler(int sig) {
     g_pHyprpicker->m_vLayerSurfaces.clear();
     exit(0);
 }
@@ -242,13 +246,13 @@ void CHyprpicker::convertBuffer(SP<SPoolBuffer> pBuffer) {
 
             for (int y = 0; y < pBuffer->pixelSize.y; ++y) {
                 for (int x = 0; x < pBuffer->pixelSize.x; ++x) {
-                    struct pixel {
+                    struct SPixel {
                         // little-endian ARGB
                         unsigned char blue;
                         unsigned char green;
                         unsigned char red;
                         unsigned char alpha;
-                    }* px = (struct pixel*)(data + (y * (int)pBuffer->pixelSize.x * 4) + (x * 4));
+                    }* px = (struct SPixel*)(data + (static_cast<ptrdiff_t>(y * (int)pBuffer->pixelSize.x * 4)) + (static_cast<ptrdiff_t>(x * 4)));
 
                     std::swap(px->red, px->blue);
                 }
@@ -262,7 +266,7 @@ void CHyprpicker::convertBuffer(SP<SPoolBuffer> pBuffer) {
 
             for (int y = 0; y < pBuffer->pixelSize.y; ++y) {
                 for (int x = 0; x < pBuffer->pixelSize.x; ++x) {
-                    uint32_t* px = (uint32_t*)(data + (y * (int)pBuffer->pixelSize.x * 4) + (x * 4));
+                    uint32_t* px = (uint32_t*)(data + (static_cast<ptrdiff_t>(y * (int)pBuffer->pixelSize.x * 4)) + (static_cast<ptrdiff_t>(x * 4)));
 
                     // conv to 8 bit
                     uint8_t R = (uint8_t)std::round((255.0 * (((*px) & 0b00000000000000000000001111111111) >> 0) / 1023.0));
@@ -292,19 +296,19 @@ void* CHyprpicker::convert24To32Buffer(SP<SPoolBuffer> pBuffer) {
         case WL_SHM_FORMAT_BGR888: {
             for (int y = 0; y < pBuffer->pixelSize.y; ++y) {
                 for (int x = 0; x < pBuffer->pixelSize.x; ++x) {
-                    struct pixel3 {
+                    struct SPixel3 {
                         // little-endian RGB
                         unsigned char blue;
                         unsigned char green;
                         unsigned char red;
-                    }* srcPx = (struct pixel3*)(oldBuffer + (y * pBuffer->stride) + (x * 3));
-                    struct pixel4 {
+                    }* srcPx = (struct SPixel3*)(oldBuffer + (static_cast<size_t>(y * pBuffer->stride)) + (static_cast<ptrdiff_t>(x * 3)));
+                    struct SPixel4 {
                         // little-endian ARGB
                         unsigned char blue;
                         unsigned char green;
                         unsigned char red;
                         unsigned char alpha;
-                    }* dstPx = (struct pixel4*)(newBuffer + (y * newBufferStride) + (x * 4));
+                    }* dstPx = (struct SPixel4*)(newBuffer + (static_cast<ptrdiff_t>(y * newBufferStride)) + (static_cast<ptrdiff_t>(x * 4)));
                     *dstPx   = {.blue = srcPx->red, .green = srcPx->green, .red = srcPx->blue, .alpha = 0xFF};
                 }
             }
@@ -312,19 +316,19 @@ void* CHyprpicker::convert24To32Buffer(SP<SPoolBuffer> pBuffer) {
         case WL_SHM_FORMAT_RGB888: {
             for (int y = 0; y < pBuffer->pixelSize.y; ++y) {
                 for (int x = 0; x < pBuffer->pixelSize.x; ++x) {
-                    struct pixel3 {
+                    struct SPixel3 {
                         // big-endian RGB
                         unsigned char red;
                         unsigned char green;
                         unsigned char blue;
-                    }* srcPx = (struct pixel3*)(oldBuffer + (y * pBuffer->stride) + (x * 3));
-                    struct pixel4 {
+                    }* srcPx = (struct SPixel3*)(oldBuffer + (y * pBuffer->stride) + (x * 3));
+                    struct SPixel4 {
                         // big-endian ARGB
                         unsigned char alpha;
                         unsigned char red;
                         unsigned char green;
                         unsigned char blue;
-                    }* dstPx = (struct pixel4*)(newBuffer + (y * newBufferStride) + (x * 4));
+                    }* dstPx = (struct SPixel4*)(newBuffer + (y * newBufferStride) + (x * 4));
                     *dstPx   = {.alpha = 0xFF, .red = srcPx->red, .green = srcPx->green, .blue = srcPx->blue};
                 }
             }
@@ -426,17 +430,43 @@ void CHyprpicker::renderSurface(CLayerSurface* pSurface, bool forceInactive) {
             cairo_clip(PCAIRO);
             cairo_paint(PCAIRO);
 
-            if (!m_bDisableHexPreview) {
+            if (!m_bDisablePreview) {
                 const auto  currentColor = getColorFromPixel(pSurface, CLICKPOS);
-                std::string hexBuffer;
-                if (m_bUseLowerCase)
-                    hexBuffer = std::format("#{:02x}{:02x}{:02x}", currentColor.r, currentColor.g, currentColor.b);
-                else
-                    hexBuffer = std::format("#{:02X}{:02X}{:02X}", currentColor.r, currentColor.g, currentColor.b);
+                std::string previewBuffer;
+                switch (m_bSelectedOutputMode) {
+                    case OUTPUT_HEX: {
+                        previewBuffer = std::format("#{:02X}{:02X}{:02X}", currentColor.r, currentColor.g, currentColor.b);
+                        if (m_bUseLowerCase)
+                            for (auto& c : previewBuffer)
+                                c = std::tolower(c);
+                        break;
+                    };
+                    case OUTPUT_RGB: {
+                        previewBuffer = std::format("{} {} {}", currentColor.r, currentColor.g, currentColor.b);
+                        break;
+                    };
+                    case OUTPUT_HSL: {
+                        float h, s, l;
+                        currentColor.getHSL(h, s, l);
+                        previewBuffer = std::format("{} {}% {}%", h, s, l);
+                        break;
+                    };
+                    case OUTPUT_HSV: {
+                        float h, s, v;
+                        currentColor.getHSV(h, s, v);
+                        previewBuffer = std::format("{} {}% {}%", h, s, v);
+                        break;
+                    };
+                    case OUTPUT_CMYK: {
+                        float c, m, y, k;
+                        currentColor.getCMYK(c, m, y, k);
+                        previewBuffer = std::format("{}% {}% {}% {}%", c, m, y, k);
+                        break;
+                    };
+                };
+                cairo_set_source_rgba(PCAIRO, 0.0, 0.0, 0.0, 0.75);
 
-                cairo_set_source_rgba(PCAIRO, 0.0, 0.0, 0.0, 0.5);
-
-                double x, y, width = 85, height = 28, radius = 6;
+                double x, y, width = 8 + (11 * previewBuffer.length()), height = 28, radius = 6;
 
                 if (CLICKPOS.y > (PBUFFER->pixelSize.y - 50) && CLICKPOS.x > (PBUFFER->pixelSize.x - 100)) {
                     x = CLICKPOS.x - 80;
@@ -451,7 +481,7 @@ void CHyprpicker::renderSurface(CLayerSurface* pSurface, bool forceInactive) {
                     x = CLICKPOS.x;
                     y = CLICKPOS.y + 20;
                 }
-
+                x -= 5.5 * previewBuffer.length();
                 cairo_move_to(PCAIRO, x + radius, y);
                 cairo_arc(PCAIRO, x + width - radius, y + radius, radius, -M_PI_2, 0);
                 cairo_arc(PCAIRO, x + width - radius, y + height - radius, radius, 0, M_PI_2);
@@ -477,7 +507,7 @@ void CHyprpicker::renderSurface(CLayerSurface* pSurface, bool forceInactive) {
                 else
                     cairo_move_to(PCAIRO, textX, CLICKPOS.y + 40);
 
-                cairo_show_text(PCAIRO, hexBuffer.c_str());
+                cairo_show_text(PCAIRO, previewBuffer.c_str());
 
                 cairo_surface_flush(PBUFFER->surface);
             }
@@ -522,12 +552,13 @@ CColor CHyprpicker::getColorFromPixel(CLayerSurface* pLS, Vector2D pix) {
         return CColor{.r = 0, .g = 0, .b = 0, .a = 0};
 
     void* dataSrc = pLS->screenBuffer->paddedData ? pLS->screenBuffer->paddedData : pLS->screenBuffer->data;
-    struct pixel {
+
+    struct SPixel {
         unsigned char blue;
         unsigned char green;
         unsigned char red;
         unsigned char alpha;
-    }* px = (struct pixel*)((char*)dataSrc + ((ptrdiff_t)pix.y * (int)pLS->screenBuffer->pixelSize.x * 4) + ((ptrdiff_t)pix.x * 4));
+    }* px = (struct SPixel*)((char*)dataSrc + ((ptrdiff_t)pix.y * (int)pLS->screenBuffer->pixelSize.x * 4) + ((ptrdiff_t)pix.x * 4));
 
     return CColor{.r = px->red, .g = px->green, .b = px->blue, .a = px->alpha};
 }
@@ -571,9 +602,9 @@ void CHyprpicker::initKeyboard() {
 
         if (m_pXKBState) {
             if (xkb_state_key_get_one_sym(m_pXKBState, key + 8) == XKB_KEY_Escape)
-                finish();
+                finish(2);
         } else if (key == 1) // Assume keycode 1 is escape
-            finish();
+            finish(2);
     });
 }
 
@@ -615,9 +646,6 @@ void CHyprpicker::initMouse() {
         markDirty();
     });
     m_pPointer->setButton([this](CCWlPointer* r, uint32_t serial, uint32_t time, uint32_t button, uint32_t button_state) {
-        auto fmax3 = [](float a, float b, float c) -> float { return (a > b && a > c) ? a : (b > c) ? b : c; };
-        auto fmin3 = [](float a, float b, float c) -> float { return (a < b && a < c) ? a : (b < c) ? b : c; };
-
         // relative brightness of a color
         // https://www.w3.org/TR/2008/REC-WCAG20-20081211/#relativeluminancedef
         const auto FLUMI = [](const float& c) -> float { return c <= 0.03928 ? c / 12.92 : powf((c + 0.055) / 1.055, 2.4); };
@@ -632,18 +660,25 @@ void CHyprpicker::initMouse() {
         // https://www.w3.org/TR/2008/REC-WCAG20-20081211/#contrast-ratiodef
         const uint8_t FG = 0.2126 * FLUMI(COL.r / 255.0f) + 0.7152 * FLUMI(COL.g / 255.0f) + 0.0722 * FLUMI(COL.b / 255.0f) > 0.17913 ? 0 : 255;
 
+        auto          toHex = [this](int i) -> std::string {
+            const char* DS = m_bUseLowerCase ? "0123456789abcdef" : "0123456789ABCDEF";
+
+            std::string result = "";
+
+            result += DS[i / 16];
+            result += DS[i % 16];
+
+            return result;
+        };
+
+        std::string hexColor = std::format("#{0:02x}{1:02x}{2:02x}", COL.r, COL.g, COL.b);
+
         switch (m_bSelectedOutputMode) {
             case OUTPUT_CMYK: {
-                // http://www.codeproject.com/KB/applications/xcmyk.aspx
+                float c, m, y, k;
+                COL.getCMYK(c, m, y, k);
 
-                float r = 1 - (COL.r / 255.0f), g = 1 - (COL.g / 255.0f), b = 1 - (COL.b / 255.0f);
-                float k = fmin3(r, g, b), K = (k == 1) ? 1 : 1 - k;
-                float c = (r - k) / K, m = (g - k) / K, y = (b - k) / K;
-
-                c = std::round(c * 100);
-                m = std::round(m * 100);
-                y = std::round(y * 100);
-                k = std::round(k * 100);
+                std::string formattedColor = std::format("{}% {}% {}% {}%", c, m, y, k);
 
                 if (m_bFancyOutput)
                     Debug::log(NONE, "\033[38;2;%i;%i;%i;48;2;%i;%i;%im%g%% %g%% %g%% %g%%\033[0m", FG, FG, FG, COL.r, COL.g, COL.b, c, m, y, k);
@@ -651,26 +686,15 @@ void CHyprpicker::initMouse() {
                     Debug::log(NONE, "%g%% %g%% %g%% %g%%", c, m, y, k);
 
                 if (m_bAutoCopy)
-                    Clipboard::copy("%g%% %g%% %g%% %g%%", c, m, y, k);
+                    NClipboard::copy(formattedColor);
+
+                if (m_bNotify)
+                    NNotify::send(hexColor, formattedColor);
+
                 finish();
                 break;
             }
             case OUTPUT_HEX: {
-                auto toHex = [this](int i) -> std::string {
-                    const char* DS = m_bUseLowerCase ? "0123456789abcdef" : "0123456789ABCDEF";
-
-                    std::string result = "";
-
-                    result += DS[i / 16];
-                    result += DS[i % 16];
-
-                    return result;
-                };
-
-                auto hexR = toHex(COL.r);
-                auto hexG = toHex(COL.g);
-                auto hexB = toHex(COL.b);
-
                 if (m_bFancyOutput)
                     Debug::log(NONE, "\033[38;2;%i;%i;%i;48;2;%i;%i;%im#%s%s%s\033[0m", FG, FG, FG, COL.r, COL.g, COL.b, toHex(COL.r).c_str(), toHex(COL.g).c_str(),
                                toHex(COL.b).c_str());
@@ -678,57 +702,40 @@ void CHyprpicker::initMouse() {
                     Debug::log(NONE, "#%s%s%s", toHex(COL.r).c_str(), toHex(COL.g).c_str(), toHex(COL.b).c_str());
 
                 if (m_bAutoCopy)
-                    Clipboard::copy("#%s%s%s", toHex(COL.r).c_str(), toHex(COL.g).c_str(), toHex(COL.b).c_str());
+                    NClipboard::copy(hexColor);
+
+                if (m_bNotify)
+                    NNotify::send(hexColor, hexColor);
+
                 finish();
                 break;
             }
             case OUTPUT_RGB: {
+                std::string formattedColor = std::format("{} {} {}", COL.r, COL.g, COL.b);
+
                 if (m_bFancyOutput)
                     Debug::log(NONE, "\033[38;2;%i;%i;%i;48;2;%i;%i;%im%i %i %i\033[0m", FG, FG, FG, COL.r, COL.g, COL.b, COL.r, COL.g, COL.b);
                 else
                     Debug::log(NONE, "%i %i %i", COL.r, COL.g, COL.b);
 
                 if (m_bAutoCopy)
-                    Clipboard::copy("%i %i %i", COL.r, COL.g, COL.b);
+                    NClipboard::copy(formattedColor);
+
+                if (m_bNotify)
+                    NNotify::send(hexColor, formattedColor);
+
                 finish();
                 break;
             }
             case OUTPUT_HSL:
             case OUTPUT_HSV: {
-                // https://en.wikipedia.org/wiki/HSL_and_HSV#From_RGB
+                float h, s, l_or_v;
+                if (m_bSelectedOutputMode == OUTPUT_HSV)
+                    COL.getHSV(h, s, l_or_v);
+                else
+                    COL.getHSL(h, s, l_or_v);
 
-                auto floatEq = [](float a, float b) -> bool {
-                    return std::nextafter(a, std::numeric_limits<double>::lowest()) <= b && std::nextafter(a, std::numeric_limits<double>::max()) >= b;
-                };
-
-                float h, s, l, v;
-                float r = COL.r / 255.0f, g = COL.g / 255.0f, b = COL.b / 255.0f;
-                float max = fmax3(r, g, b), min = fmin3(r, g, b);
-                float c = max - min;
-
-                v = max;
-                if (c == 0)
-                    h = 0;
-                else if (v == r)
-                    h = 60 * (0 + (g - b) / c);
-                else if (v == g)
-                    h = 60 * (2 + (b - r) / c);
-                else /* v == b */
-                    h = 60 * (4 + (r - g) / c);
-
-                float l_or_v;
-                if (m_bSelectedOutputMode == OUTPUT_HSL) {
-                    l      = (max + min) / 2;
-                    s      = (floatEq(l, 0.0f) || floatEq(l, 1.0f)) ? 0 : (v - l) / std::min(l, 1 - l);
-                    l_or_v = std::round(l * 100);
-                } else {
-                    v      = max;
-                    s      = floatEq(v, 0.0f) ? 0 : c / v;
-                    l_or_v = std::round(v * 100);
-                }
-
-                h = std::round(h < 0 ? h + 360 : h);
-                s = std::round(s * 100);
+                std::string formattedColor = std::format("{} {}% {}%", h, s, l_or_v);
 
                 if (m_bFancyOutput)
                     Debug::log(NONE, "\033[38;2;%i;%i;%i;48;2;%i;%i;%im%g %g%% %g%%\033[0m", FG, FG, FG, COL.r, COL.g, COL.b, h, s, l_or_v);
@@ -736,7 +743,11 @@ void CHyprpicker::initMouse() {
                     Debug::log(NONE, "%g %g%% %g%%", h, s, l_or_v);
 
                 if (m_bAutoCopy)
-                    Clipboard::copy("%g %g%% %g%%", h, s, l_or_v);
+                    NClipboard::copy(formattedColor);
+
+                if (m_bNotify)
+                    NNotify::send(hexColor, formattedColor);
+
                 finish();
                 break;
             }
